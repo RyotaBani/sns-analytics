@@ -1,0 +1,26 @@
+services:
+  - type: cron
+    name: sns-analytics
+    runtime: docker
+    schedule: "0 0 * * *"   # 毎日 UTC 0:00 = JST 9:00
+    dockerfilePath: ./Dockerfile
+    # 無料プランは 512MB RAM / 0.1 CPU
+    # Playwright は重いので実行時間に余裕を持たせる
+
+    envVars:
+      - key: GOOGLE_CREDENTIALS
+        sync: false          # Render ダッシュボードで手動入力
+      - key: SPREADSHEET_ID
+        sync: false
+      - key: X_COOKIES_NAKYATSUKURUAPP
+        sync: false
+      - key: X_COOKIES_SIRIUS
+        sync: false
+      - key: THREADS_TOKEN_NAKYATSUKURUAPP
+        sync: false
+      - key: THREADS_TOKEN_SIRIUS
+        sync: false
+      - key: NOTE_COOKIES_NAKYATSUKURUAPP
+        sync: false
+      - key: NOTE_COOKIES_SIRIUS
+        sync: false
