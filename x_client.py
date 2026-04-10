@@ -1,184 +1,214 @@
 """
-X (Twitter) クライアント
-Playwright でクッキーを使って直接スクレイピング
+X (Twitter) クライアント - Playwright スクレイピング版
+Render (Linux headless) 環境でのbot検知を回避する改善版
 """
 
 import asyncio
+import json
 import re
+import os
+from datetime import datetime, timezone, timedelta
 from playwright.async_api import async_playwright
+
+JST = timezone(timedelta(hours=9))
+
+# bot検知を回避するためのUser-Agent（一般的なChrome）
+USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/123.0.0.0 Safari/537.36"
+)
 
 
 class XClient:
     def __init__(self, cookies: dict):
-        self._cookies = cookies
-        self._browser = None
-        self._ctx = None
-        self._page = None
+        self.cookies = cookies
+        self.username = None
 
-    async def init(self):
-        pw = await async_playwright().start()
-        self._browser = await pw.chromium.launch(headless=True)
-        self._ctx = await self._browser.new_context()
-        await self._ctx.add_cookies([
-            {"name": k, "value": v, "domain": ".x.com", "path": "/"}
-            for k, v in self._cookies.items()
-        ])
-        self._page = await self._ctx.new_page()
-
-    async def close(self):
-        if self._browser:
-            await self._browser.close()
-
-    async def get_user(self, username: str):
-        """ユーザー情報取得（フォロワー数）"""
-        await self._page.goto(
-            f"https://x.com/{username}", wait_until="domcontentloaded"
+    async def _make_page(self, playwright):
+        """ブラウザページを作成（bot検知回避設定付き）"""
+        browser = await playwright.chromium.launch(
+            headless=True,
+            args=[
+                "--no-sandbox",
+                "--disable-setuid-sandbox",
+                "--disable-blink-features=AutomationControlled",
+                "--disable-dev-shm-usage",
+            ],
         )
-        await asyncio.sleep(3)
-
-        followers = 0
-        following = 0
-        try:
-            # フォロワー数
-            follower_links = await self._page.query_selector_all(
-                f'a[href*="verified_followers"], a[href*="/followers"]'
-            )
-            for el in follower_links:
-                text = await el.inner_text()
-                nums = re.findall(r"[\d,\.]+", text)
-                if nums:
-                    n = nums[0].replace(",", "")
-                    if "万" in text:
-                        followers = int(float(n) * 10000)
-                    else:
-                        followers = int(float(n))
-                    break
-
-            # フォロー数
-            following_links = await self._page.query_selector_all(
-                f'a[href*="/following"]'
-            )
-            for el in following_links:
-                text = await el.inner_text()
-                nums = re.findall(r"[\d,\.]+", text)
-                if nums:
-                    following = int(nums[0].replace(",", ""))
-                    break
-        except Exception as e:
-            print(f"    [WARN] X profile error: {e}")
-
-        # ダミーオブジェクトを返す
-        return _UserInfo(username=username, followers_count=followers, following_count=following)
-
-    async def get_recent_tweets(self, user_id: str, count: int = 20):
-        """最新ツイートのメトリクスを取得"""
-        username = user_id  # user_id の代わりに username を渡す
-        await self._page.goto(
-            f"https://x.com/{username}", wait_until="domcontentloaded"
+        context = await browser.new_context(
+            user_agent=USER_AGENT,
+            viewport={"width": 1280, "height": 800},
+            locale="ja-JP",
+            extra_http_headers={
+                "Accept-Language": "ja,en;q=0.9",
+            },
         )
-        await asyncio.sleep(3)
+        # WebDriver フラグを隠す
+        await context.add_init_script(
+            "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
+        )
 
-        # スクロールしてツイートを読み込む
-        for _ in range(2):
-            await self._page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-            await asyncio.sleep(2)
+        # クッキーをセット
+        cookie_list = []
+        domain_map = {
+            "auth_token": ".x.com",
+            "ct0": ".x.com",
+            "twid": ".x.com",
+            "kdt": ".x.com",
+        }
+        for name, value in self.cookies.items():
+            cookie_list.append({
+                "name": name,
+                "value": str(value),
+                "domain": domain_map.get(name, ".x.com"),
+                "path": "/",
+                "secure": True,
+            })
+        await context.add_cookies(cookie_list)
 
-        # ツイートのリンクを収集
-        tweet_links = await self._page.query_selector_all('a[href*="/status/"]')
-        tweet_ids = []
-        seen = set()
-        for el in tweet_links:
-            href = await el.get_attribute("href")
-            if href and "/status/" in href and username.lower() in href.lower():
-                m = re.search(r"/status/(\d+)", href)
-                if m and m.group(1) not in seen:
-                    seen.add(m.group(1))
-                    tweet_ids.append(m.group(1))
-            if len(tweet_ids) >= count:
-                break
+        page = await context.new_page()
+        return browser, context, page
 
-        tweets = []
-        for tweet_id in tweet_ids[:count]:
-            tweet = await self._get_tweet_stats(username, tweet_id)
-            if tweet:
-                tweets.append(tweet)
-            await asyncio.sleep(1)
+    async def get_profile(self, username: str) -> dict:
+        """プロフィールページからフォロワー数を取得"""
+        async with async_playwright() as pw:
+            browser, context, page = await self._make_page(pw)
+            try:
+                await page.goto(
+                    f"https://x.com/{username}",
+                    wait_until="domcontentloaded",
+                    timeout=30000,
+                )
+                # ページが十分読み込まれるまで待つ
+                await asyncio.sleep(5)
 
-        return tweets
+                followers = 0
 
-    async def _get_tweet_stats(self, username: str, tweet_id: str):
-        """ツイート単体のメトリクス取得"""
-        try:
-            await self._page.goto(
-                f"https://x.com/{username}/status/{tweet_id}",
-                wait_until="domcontentloaded"
-            )
-            await asyncio.sleep(2)
+                # 方法1: verified_followers リンクのテキストから取得
+                try:
+                    el = await page.query_selector(f'a[href*="/{username}/verified_followers"]')
+                    if not el:
+                        el = await page.query_selector(f'a[href*="/followers"]')
+                    if el:
+                        text = await el.inner_text()
+                        m = re.search(r'([\d,]+(?:\.\d+)?[万KMkm]?)\s*(フォロワー|Followers?)', text, re.IGNORECASE)
+                        if m:
+                            followers = _parse_count(m.group(1))
+                except Exception:
+                    pass
 
-            # テキスト取得
-            text = ""
-            text_el = await self._page.query_selector('[data-testid="tweetText"]')
-            if text_el:
-                text = await text_el.inner_text()
+                # 方法2: ページ全体のテキストからregexで抽出
+                if followers == 0:
+                    try:
+                        content = await page.content()
+                        # "53 フォロワー" or "53 Followers" パターン
+                        patterns = [
+                            r'"followers_count":(\d+)',
+                            r'([\d,]+)\s*フォロワー',
+                            r'([\d,]+)\s*Followers',
+                        ]
+                        for pat in patterns:
+                            m = re.search(pat, content)
+                            if m:
+                                followers = _parse_count(m.group(1))
+                                if followers > 0:
+                                    break
+                    except Exception:
+                        pass
 
-            # ビュー数
-            views = 0
-            view_els = await self._page.query_selector_all('a[href*="/analytics"]')
-            for el in view_els:
-                t = await el.inner_text()
-                if t:
-                    n = re.sub(r"[^\d]", "", t)
-                    if n:
-                        views = int(n)
-                        break
+                # 方法3: aria-label からフォロワー数を探す
+                if followers == 0:
+                    try:
+                        elements = await page.query_selector_all('[aria-label]')
+                        for el in elements:
+                            label = await el.get_attribute('aria-label') or ""
+                            m = re.search(r'([\d,]+)\s*(フォロワー|Followers?)', label, re.IGNORECASE)
+                            if m:
+                                followers = _parse_count(m.group(1))
+                                if followers > 0:
+                                    break
+                    except Exception:
+                        pass
 
-            # いいね・RT・返信
-            likes = retweets = replies = quotes = bookmarks = 0
-            stat_els = await self._page.query_selector_all('[data-testid$="-count"]')
-            for el in stat_els:
-                testid = await el.get_attribute("data-testid")
-                t = await el.inner_text()
-                n = int(re.sub(r"[^\d]", "", t) or "0")
-                if "like" in testid:
-                    likes = n
-                elif "retweet" in testid:
-                    retweets = n
-                elif "reply" in testid:
-                    replies = n
+                return {"followers": followers}
 
-            return _TweetInfo(
-                id=tweet_id,
-                created_at="",
-                text=text[:100],
-                view_count=views,
-                favorite_count=likes,
-                retweet_count=retweets,
-                reply_count=replies,
-                quote_count=quotes,
-                bookmark_count=bookmarks,
-            )
-        except Exception as e:
-            print(f"    [WARN] tweet error ({tweet_id}): {e}")
-            return None
+            finally:
+                await browser.close()
+
+    async def get_recent_tweets(self, username: str, limit: int = 10) -> list:
+        """最近のツイートとメトリクスを取得"""
+        async with async_playwright() as pw:
+            browser, context, page = await self._make_page(pw)
+            try:
+                await page.goto(
+                    f"https://x.com/{username}",
+                    wait_until="domcontentloaded",
+                    timeout=30000,
+                )
+                await asyncio.sleep(5)
+
+                tweets = []
+                today = datetime.now(JST).strftime("%Y-%m-%d")
+
+                # ツイート要素を取得
+                articles = await page.query_selector_all('article[data-testid="tweet"]')
+
+                for article in articles[:limit]:
+                    try:
+                        # テキスト
+                        text_el = await article.query_selector('[data-testid="tweetText"]')
+                        text = await text_el.inner_text() if text_el else ""
+
+                        # いいね数
+                        like_el = await article.query_selector('[data-testid="like"] span')
+                        likes = _parse_count(await like_el.inner_text() if like_el else "0")
+
+                        # リツイート数
+                        rt_el = await article.query_selector('[data-testid="retweet"] span')
+                        retweets = _parse_count(await rt_el.inner_text() if rt_el else "0")
+
+                        # 返信数
+                        reply_el = await article.query_selector('[data-testid="reply"] span')
+                        replies = _parse_count(await reply_el.inner_text() if reply_el else "0")
+
+                        # ビュー数（アナリティクス）
+                        views = 0
+                        view_el = await article.query_selector('a[href*="/analytics"] span')
+                        if view_el:
+                            views = _parse_count(await view_el.inner_text())
+
+                        if text:
+                            tweets.append({
+                                "date": today,
+                                "account": username,
+                                "text": text[:100],
+                                "views": views,
+                                "likes": likes,
+                                "retweets": retweets,
+                                "replies": replies,
+                            })
+                    except Exception:
+                        continue
+
+                return tweets
+
+            finally:
+                await browser.close()
 
 
-class _UserInfo:
-    def __init__(self, username, followers_count, following_count):
-        self.id = username
-        self.followers_count = followers_count
-        self.following_count = following_count
-
-
-class _TweetInfo:
-    def __init__(self, id, created_at, text, view_count,
-                 favorite_count, retweet_count, reply_count,
-                 quote_count, bookmark_count):
-        self.id = id
-        self.created_at = created_at
-        self.text = text
-        self.view_count = view_count
-        self.favorite_count = favorite_count
-        self.retweet_count = retweet_count
-        self.reply_count = reply_count
-        self.quote_count = quote_count
-        self.bookmark_count = bookmark_count
+def _parse_count(text: str) -> int:
+    """'1.2万' '53' '1,234' などをintに変換"""
+    if not text:
+        return 0
+    text = text.strip().replace(",", "")
+    try:
+        if "万" in text:
+            return int(float(text.replace("万", "")) * 10000)
+        if text.upper().endswith("K"):
+            return int(float(text[:-1]) * 1000)
+        if text.upper().endswith("M"):
+            return int(float(text[:-1]) * 1000000)
+        return int(float(text))
+    except (ValueError, TypeError):
+        return 0
