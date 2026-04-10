@@ -17,6 +17,7 @@ from threads_client import ThreadsClient
 from note_client import NoteClient
 from sheets_writer import SheetsWriter
 from config import ACCOUNTS
+from notion_writer import NotionWriter
 
 
 async def main():
@@ -27,6 +28,9 @@ async def main():
         credentials_json=json.loads(os.environ["GOOGLE_CREDENTIALS"]),
         spreadsheet_id=os.environ["SPREADSHEET_ID"],
     )
+
+    x_followers = {}
+    threads_followers = {}
 
     for account_key, account_cfg in ACCOUNTS.items():
         print(f"\n--- {account_key} ---")
@@ -45,6 +49,7 @@ async def main():
                     "followers": user.followers_count,
                     "following": user.following_count,
                 })
+                x_followers[account_key] = user.followers_count
                 print(f"  X followers: {user.followers_count}")
 
                 tweets = await x.get_recent_tweets(account_cfg["x_username"], count=20)
@@ -83,6 +88,7 @@ async def main():
                     "account": account_key,
                     **profile,
                 })
+                threads_followers[account_key] = profile['followers']
                 print(f"  Threads followers: {profile['followers']}")
 
                 posts = await th.get_posts(limit=10)
@@ -130,6 +136,18 @@ async def main():
             finally:
                 if note:
                     await note.close()
+
+    # ── Notion フォロワー数更新 ──────────────────────
+    try:
+        notion = NotionWriter()
+        notion.update_followers({
+            "nakyatsukuruapp_x": x_followers.get("nakyatsukuruapp", 0),
+            "nakyatsukuruapp_threads": threads_followers.get("nakyatsukuruapp", 0),
+            "sirius_x": x_followers.get("sirius", 0),
+            "sirius_threads": threads_followers.get("sirius", 0),
+        })
+    except Exception as e:
+        print(f"  [ERROR] Notion: {e}")
 
     print("\n=== Done ===")
 
