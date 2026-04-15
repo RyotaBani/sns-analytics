@@ -56,15 +56,15 @@ async def main():
                 tweet_rows = [{
                     "date": today,
                     "account": account_key,
-                    "tweet_id": tw.id,
-                    "created_at": tw.created_at,
-                    "text": tw.text[:100],
-                    "views": tw.view_count or 0,
-                    "likes": tw.favorite_count or 0,
-                    "retweets": tw.retweet_count or 0,
-                    "replies": tw.reply_count or 0,
-                    "quotes": tw.quote_count or 0,
-                    "bookmarks": tw.bookmark_count or 0,
+                    "tweet_id": tw.get("id", ""),
+                    "created_at": tw.get("date", ""),
+                    "text": tw.get("text", "")[:100],
+                    "views": tw.get("views", 0),
+                    "likes": tw.get("likes", 0),
+                    "retweets": tw.get("retweets", 0),
+                    "replies": tw.get("replies", 0),
+                    "quotes": 0,
+                    "bookmarks": 0,
                 } for tw in tweets]
                 sheets.append_batch("X_ツイート", tweet_rows)
                 print(f"  X tweets logged: {len(tweet_rows)}")
