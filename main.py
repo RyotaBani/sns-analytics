@@ -170,3 +170,8 @@ if __name__ == "__main__":
         asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
     asyncio.run(main())
     asyncio.run(run_posters())
+    # 毎日7時のみ投稿文を自動生成
+    import datetime as _dt
+    if _dt.datetime.now(_dt.timezone(_dt.timedelta(hours=9))).hour == 7:
+        from content_generator import main as gen_main
+        gen_main()
