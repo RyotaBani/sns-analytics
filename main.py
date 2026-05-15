@@ -152,7 +152,21 @@ async def main():
     print("\n=== Done ===")
 
 
+async def run_posters():
+    """X・Threads自動投稿（時刻指定対応）"""
+    try:
+        from x_poster import main as x_main
+        await x_main()
+    except Exception as e:
+        print(f"  [ERROR] X poster: {e}")
+    try:
+        from threads_poster import main as threads_main
+        await threads_main()
+    except Exception as e:
+        print(f"  [ERROR] Threads poster: {e}")
+
 if __name__ == "__main__":
     if sys.platform == "win32":
         asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
     asyncio.run(main())
+    asyncio.run(run_posters())
