@@ -125,9 +125,9 @@ async def post_to_x(account_key, text):
                 print(f"  [ERROR] 投稿ボックスが見つかりません")
                 return None
 
-            await tweet_box.click()
+            await tweet_box.click(force=True)
             await asyncio.sleep(1)
-            await tweet_box.fill(text)
+            await page.keyboard.type(text)
             await asyncio.sleep(1)
 
             send_btn = await page.query_selector('[data-testid="tweetButtonInline"]')
